@@ -1,0 +1,113 @@
+#!/bin/bash
+# kiro-fix-bun — Replace kiro-cli's bundled bun with the baseline (no-AVX) build.
+# Run this after a kiro-cli update if the TUI stops working (SIGILL crash).
+#
+# The Intel Celeron J4125 (and other pre-Haswell / Gemini Lake CPUs) lack AVX
+# instructions. Bun's regular x64 build requires AVX; the "baseline" build does not.
+#
+# Usage:
+#   kiro-fix-bun          # auto-detect version and fix if needed
+#   kiro-fix-bun --force  # fix even if baseline is already in place
+
+set -euo pipefail
+
+BUN_PATH="$HOME/.local/share/kiro-cli/bun"
+BACKUP_PATH="$BUN_PATH.original"
+
+# --- Preflight checks ---
+
+if [[ ! -f "$BUN_PATH" ]]; then
+    echo "✘ kiro-cli bun binary not found at $BUN_PATH"
+    echo "  Is kiro-cli installed?"
+    exit 1
+fi
+
+# Check if CPU lacks AVX (if it has AVX, no fix needed)
+if grep -q ' avx ' /proc/cpuinfo 2>/dev/null; then
+    echo "✔ This CPU supports AVX — no fix needed."
+    exit 0
+fi
+
+# Check if bun actually works on this CPU (the only reliable test)
+is_working() {
+    "$BUN_PATH" --version >/dev/null 2>&1 || return 1
+}
+
+if is_working && [[ "${1:-}" != "--force" ]]; then
+    echo "✔ Bun binary works on this CPU — no fix needed."
+    echo "  (use --force to re-download anyway)"
+    exit 0
+fi
+
+# --- Detect version ---
+
+BUN_VERSION=$(grep -oPam1 'Bun v\K[0-9]+\.[0-9]+\.[0-9]+' "$BUN_PATH" || true)
+
+if [[ -z "$BUN_VERSION" ]]; then
+    echo "✘ Could not detect bun version from $BUN_PATH"
+    echo "  Trying to run it to get version..."
+    BUN_VERSION=$("$BUN_PATH" --version 2>/dev/null || true)
+    if [[ -z "$BUN_VERSION" ]]; then
+        echo "✘ Binary crashes (expected on non-AVX CPU). Cannot auto-detect version."
+        echo "  Please provide the version manually:"
+        echo "    kiro-fix-bun <version>   e.g. kiro-fix-bun 1.3.13"
+        # Allow passing version as argument
+        if [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            BUN_VERSION="$1"
+        else
+            exit 1
+        fi
+    fi
+fi
+
+echo "Detected bun version: $BUN_VERSION"
+echo "Downloading baseline build..."
+
+# --- Download baseline ---
+
+URL="https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64-baseline.zip"
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+if ! curl -fSL "$URL" -o "$TMPDIR/bun-baseline.zip"; then
+    echo "✘ Download failed. URL: $URL"
+    echo "  Check if version $BUN_VERSION has a baseline release at:"
+    echo "  https://github.com/oven-sh/bun/releases/tag/bun-v${BUN_VERSION}"
+    exit 1
+fi
+
+# --- Extract and replace ---
+
+unzip -qo "$TMPDIR/bun-baseline.zip" -d "$TMPDIR"
+
+EXTRACTED="$TMPDIR/bun-linux-x64-baseline/bun"
+if [[ ! -f "$EXTRACTED" ]]; then
+    echo "✘ Expected binary not found in archive."
+    ls -la "$TMPDIR/"
+    exit 1
+fi
+
+# Verify baseline works on this CPU
+if ! "$EXTRACTED" --version >/dev/null 2>&1; then
+    echo "✘ Baseline binary also crashes on this CPU. Something else is wrong."
+    exit 1
+fi
+
+BASELINE_VERSION=$("$EXTRACTED" --version)
+echo "Baseline binary works: bun $BASELINE_VERSION"
+
+# Backup original (only if we haven't already backed up a broken one)
+if [[ ! -f "$BACKUP_PATH" ]]; then
+    cp "$BUN_PATH" "$BACKUP_PATH"
+    echo "Backed up original to: $BACKUP_PATH"
+fi
+
+# Replace
+cp "$EXTRACTED" "$BUN_PATH"
+chmod +x "$BUN_PATH"
+
+echo ""
+echo "✔ Done! Replaced kiro-cli's bun with baseline build (v${BASELINE_VERSION})."
+echo "  Original saved at: $BACKUP_PATH"
+echo ""
+echo "  Restart kiro-cli to use the TUI mode."

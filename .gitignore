@@ -1,0 +1,3 @@
+# Ignore diagnostic output files — they contain machine-specific data
+# and should not be committed. Copy them manually when comparing.
+diag-*.txt
